@@ -38,6 +38,11 @@ Trainer由 pl提供， 可以不用写繁琐的训练代码。 在base_model下�
 
 HaimianModel: 系统的核心模型， 负责整体的逻辑。 包括数据，模型等。 顶层类
 
-BaseModel: 所有模型的抽象基类， 提供标准化的训练和评估。pl.LightningModule
+BaseModel: 所有模型的抽象基类， 提供标准化的训练和评估。继承pl.LightningModule
 
 Model: 各个模型的类型。 继承nn.module
+
+
+代码核心功能：
+
+HaimianModel.fit(): 训练模型。

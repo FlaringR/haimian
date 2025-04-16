@@ -9,6 +9,7 @@ from omegaconf import DictConfig
 import pytorch_lightning as pl
 from sklearn.base import TransformerMixin
 from sklearn.model_selection import train_test_split
+from config import InferredConfig
 
 class StockDataset(Dataset):
     def __init__(
@@ -17,9 +18,11 @@ class StockDataset(Dataset):
         continuous_cols: List[str],    # 连续特征列名
         target_cols: List[str],        # 目标列名, 例如[y60_duo]
         task_types: Dict[str, str],    # 任务类型字典，例如 {"y60_duo": "regression", "y60_duo": "classification"}
+        metrics_target_cols: Optional[List[str]] = None,  # 用于统计标签的列名
         categorical_cols: Optional[List[str]] = None,  # 分类特征列名
         category_col: str = "factor_0",      # 类别列名
         target_category: int = 7,            # 目标类别（第7类）
+        time_col: str = "index",             # 时间列名
         window_len: int = 1,                 # 窗口长度
         padding_value: float = 0.0,          # 不足窗口长度时的填充值
         weight_scheme: str = 'exp',         # 样本权重计算方式
@@ -32,6 +35,7 @@ class StockDataset(Dataset):
             continuous_cols (List[str]): 连续特征列名列表
             target_cols (List[str]): 目标列名列表
             task_types (Dict[str, str]): 每个目标的任务类型
+            mertrics_target_cols (List[str], optional): 用于统计标签的列名列表（）
             categorical_cols (List[str], optional): 分类特征列名列表（需预先序数编码）
             category_col (str): 类别列名，默认为 "category"
             target_category (int): 目标类别，默认为 7
@@ -63,13 +67,21 @@ class StockDataset(Dataset):
         self.continuous_X = self._get_feature_values(self.continuous_cols, np.float32)
         self.categorical_X = self._get_feature_values(self.categorical_cols, np.int64)
 
-        # 提取目标
+        # 提取训练目标, 设置为一个字典
         self.targets = {}
         for target_name in target_cols:
             target_data = self.data[target_name].astype(np.float32).values
             if self.task_types[target_name] == "classification":
                 target_data = target_data.astype(np.int64)
-            self.targets[target_name] = target_data if target_data.ndim > 1 else target_data.reshape(-1, 1)
+            self.targets[target_name] = target_data 
+        
+        # 提取评估目标
+        self.metrics_targets = {}
+        for metrics_target_name in metrics_target_cols:
+            self.metrics_targets[metrics_target_name] = self.data[metrics_target_name].astype(np.float32).values
+        
+        # 提取时间列时刻
+        self.time_index = self.data.loc[self.valid_indices, time_col]
 
         # 计算样本权重
         self.weights = self.compute_weights()
@@ -160,12 +172,18 @@ class StockDataset(Dataset):
         targets = {}
         for target_name, target_data in self.targets.items():
             dtype = torch.long if self.task_types[target_name] == "classification" else torch.float32
-            targets[target_name] = torch.from_numpy(target_data[current_idx]).to(dtype)
+            targets[target_name] = torch.tensor(target_data[current_idx], dtype=dtype)
+        
+        # 提取评估目标（仅当前行）
+        metrics_targets = {}
+        for mertrics_target_name, metrics_target_data in self.metrics_targets.items():
+            metrics_targets[mertrics_target_name] = torch.tensor(metrics_target_data[current_idx], dtype=torch.float32)
 
         return {
             "continuous": continuous,    # (window_len, feature_dim) 或 (feature_dim) 或空张量
             "categorical": categorical,  # (window_len, categorical_dim) 或 (categorical_dim) 或空张量
-            "targets": targets           # 目标张量的字典
+            "targets": targets,           # 目标张量的字典
+            "metrics_targets": metrics_targets,#用于评估张量的字典
         }
 
     def get_weights(self) -> np.ndarray:
@@ -179,7 +197,6 @@ class StockDataModule(pl.LightningDataModule):
         train: DataFrame,
         config: DictConfig,  # 接受 DictConfig
         validation: DataFrame = None,
-        target_transform: Optional[Union[TransformerMixin, Tuple]] = None,
         train_sampler: bool = True,
         copy_data: bool = True,
         verbose: bool = True,
@@ -190,9 +207,7 @@ class StockDataModule(pl.LightningDataModule):
             train (DataFrame): 训练数据集
             config (DictConfig): 配置参数（OmegaConf 格式）
             validation (DataFrame, optional): 验证数据集，若为空则从 train 中分割
-            target_transform (Optional[Union[TransformerMixin, Tuple]]): 目标转换器
-            train_sampler (True): 是否使用训练集采样器，默认使用
-            cache_data (str): 数据缓存方式
+            train_sampler (True): 是否使用训练集采样器，默认使用, 可以获得线性权重等。
             copy_data (bool): 是否复制数据
             verbose (bool): 是否打印详细信息
         """
@@ -200,7 +215,6 @@ class StockDataModule(pl.LightningDataModule):
         self.train_data = train.copy() if copy_data else train
         self.val_data = validation.copy() if validation is not None and copy_data else validation
         self.config = config
-        self.target_transform = target_transform
         self.train_sampler = train_sampler
         self.verbose = verbose
 
@@ -208,9 +222,11 @@ class StockDataModule(pl.LightningDataModule):
         self.continuous_cols = self.config.continuous_cols
         self.target_cols = self.config.target_cols
         self.task_types = self.config.task_types
+        self.metrics_target_cols = self.config.metrics_target_cols
         self.categorical_cols = self.config.categorical_cols
         self.category_col = self.config.category_col
         self.target_category = self.config.target_category
+        self.time_col = self.config.time_col
         self.window_len = self.config.window_len
         self.padding_value = self.config.padding_value
         self.batch_size = self.config.batch_size
@@ -270,6 +286,7 @@ class StockDataModule(pl.LightningDataModule):
             continuous_cols=self.continuous_cols,
             target_cols=self.target_cols,
             task_types=self.task_types,
+            metrics_target_cols=self.metrics_target_cols,
             categorical_cols=self.categorical_cols,
             category_col=self.category_col,
             target_category=self.target_category,
@@ -282,6 +299,7 @@ class StockDataModule(pl.LightningDataModule):
             continuous_cols=self.continuous_cols,
             target_cols=self.target_cols,
             task_types=self.task_types,
+            metrics_target_cols=self.metrics_target_cols,
             categorical_cols=self.categorical_cols,
             category_col=self.category_col,
             target_category=self.target_category,
@@ -352,4 +370,78 @@ class StockDataModule(pl.LightningDataModule):
             num_workers=0,
         )
 
+    def infer_config(self, config):
+        #TODO:  增加连续特征的嵌入
+        categorical_dim = len(config.categorical_cols) if config.categorical_cols else 0
+        continuous_dim = len(config.continuous_cols)  if config.continuous_cols else 0 
+        # 输出维度的字典， 例如{y60_duo, 2}
+        output_dims = {}
 
+        for target_name in config.target_cols:
+            if config.task_types[target_name] == "regression":
+                output_dims[target_name] = 1
+            else:
+                # classification, 找到各个类别的数量
+                class_count = self.train_data[target_name].fillna("NA").nunique()   
+                output_dims[target_name] = class_count
+        
+        # categorical_cardinality 各个分类型变量的类别数量
+        categorical_cardinality = [(self.train_data[col].nunique())for col in config.categorical_cols]
+        # embedding_dims
+        if getattr(config, "embedding_dims", None) is not None:
+            embedding_dims = config.embedding_dims
+        else:
+            embedding_dims = [(x, min(8, (x + 1) // 2)) for x in categorical_cardinality]
+        # embedded_cat_dim 经过embedding层后的维度 
+        embedded_cat_dim = sum(dim for _, dim in embedding_dims)
+
+        return InferredConfig(
+            categorical_dim = categorical_dim,
+            continuous_dim = continuous_dim,
+            output_dims=output_dims,
+            embedding_dims = embedding_dims,
+            embedded_cat_dim=embedded_cat_dim
+        )
+
+    def prepare_inference_dataloader(self, test: pd.DataFrame) -> DataLoader:
+        """为推理准备 DataLoader。不依赖setup实现，防止数据泄露
+
+        参数:
+            test (pd.DataFrame): 测试数据集
+
+        返回:
+            DataLoader: 用于推理的 DataLoader
+        """
+        if self.verbose:
+            print(f"Preparing inference DataLoader for test data with {len(test)} samples...")
+
+        # 创建测试数据集，只包含第 7 类样本
+        test_dataset = StockDataset(
+            data=test,
+            continuous_cols=self.continuous_cols,
+            target_cols=self.target_cols,
+            task_types=self.task_types,
+            metrics_target_cols=self.metrics_target_cols,
+            categorical_cols=self.categorical_cols,
+            category_col=self.category_col,
+            target_category=self.target_category,
+            time_col=self.time_col,
+            window_len=self.window_len,
+            padding_value=self.padding_value,
+            weight_scheme="equal",  # 推理时不需要加权，设为 equal
+        )
+
+        # 创建 DataLoader
+        inference_loader = DataLoader(
+            test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,  # 推理时不打乱顺序
+            num_workers=0,
+        )
+
+        # 测试样本的时间索引
+        test_index = test_dataset.time_index
+
+        if self.verbose:
+            print(f"Inference DataLoader prepared with {len(test_dataset)} samples (category {self.target_category}).")
+        return inference_loader, test_index
