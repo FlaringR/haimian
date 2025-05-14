@@ -174,17 +174,7 @@ trainer.fit(model, data_module)
 - **Model Customization**: Extend `BaseModel` in `models/base_model.py` for new models.
 - **Training**: Use `train.py` to run experiments.
 
-## 🤝 Contributing
 
-We welcome contributions! Please follow these steps:
-
-1. Fork the repository.
-2. Create a feature branch (`git checkout -b feature/your-feature`).
-3. Commit your changes (`git commit -m "Add your feature"`).
-4. Push to the branch (`git push origin feature/your-feature`).
-5. Open a pull request.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## 📜 License
 
