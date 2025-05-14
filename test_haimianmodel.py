@@ -19,21 +19,22 @@ from models.deepfm import DeepFM, DeepFMConfig
 from utils.loss import MultiTaskLoss
 from haimian_model import HaimianModel
 
+
 data_config = DataConfig(
         categorical_cols=[],
-        continuous_cols=[f"factor_{i}" for i in range(1,57)],
-        target_cols=["y"],
-        task_types={"y": "classification"},
-        metrics_target_cols = ["y60_duo", "y120_duo", "y180_duo"],
+        continuous_cols=[f"factor_{i}" for i in range(1,11)],
+        target_cols=["y60_duo_class"],
+        task_types={"y60_duo_class": "classification"},
+        metrics_target_cols = ["y60_duo", "y120_duo", "y180_duo", "return_0"],
         category_col="factor_0",
+        threshold_map={"y60_duo":0.0020 , "y180_duo":0.0020},
         target_category=7,
         window_len=1,
         padding_value=0.0,
         split_ratio=0.1,
         split_type="random",
-        split_start=0.9
+        split_start=0.5
     )
-
 model_config = DeepFMConfig(
     layers = "32-32"
 )

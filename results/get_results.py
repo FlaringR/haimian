@@ -29,7 +29,7 @@ def load_and_merge_predictions(root_folder: str, feather_file_path: str) -> pd.D
                 # 读取 CSV 文件并添加到 DataFrame 列表  
                 df = pd.read_csv(csv_file_path)  
                 dataframes.append(df)  
-
+    print("file num:", len(dataframes))
     # 合并所有 DataFrame  
     combined_df = pd.concat(dataframes, ignore_index=True)  
 
@@ -43,14 +43,15 @@ def load_and_merge_predictions(root_folder: str, feather_file_path: str) -> pd.D
     result_df = pd.merge(combined_df, y_tag, on="Time", how="left")  
 
     # 过滤结果，保留 y_action 为 1 的行  
-    result_df = result_df[result_df['y_action'] == 1]  
+    # result_df = result_df[(result_df['y60_duo_class_action'] == 1) & (result_df['y180_duo_class_action'] == 1)]  
+    result_df = result_df[result_df['y60_duo_class_action'] == 1]
 
     return result_df  
 
 # 使用示例  
 # 设置参数  
-root_folder = '/data/home/lichengzhang/zhoujun/Rehaimian/logs/DeepFM_2'  
-feather_file_path = '/data/home/lichengzhang/zhoujun/HaimianData/20250325/y_tag_458_300750.SZ.ftr'  
+root_folder = '/data/home/lichengzhang/zhoujun/Rehaimian/logs/TransformerModel_5'  
+feather_file_path = '/data/home/lichengzhang/zhoujun/HaimianData/20250422/y_tag_496_300750.SZ.ftr'  
 
 # 调用函数  
 final_result = load_and_merge_predictions(root_folder, feather_file_path)  

@@ -12,8 +12,9 @@ from models import BaseModel
 import pandas 
 from pandas import DataFrame
 from utils.py_utils import getattr_nested
+from utils.feature import rankic, rankic_v2
 import inspect
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, StochasticWeightAveraging
 
 
 class HaimianModel:
@@ -81,6 +82,13 @@ class HaimianModel:
     def prepare_datamodule(self, train: DataFrame) -> StockDataModule:
         """给训练和验证准备数据模块"""
 
+        if self.config.select_features:
+            # 默认用第一个target进行筛选， 后续可以修改逻辑
+            feature_selected = self.select_factors(train, self.config.target_cols[0])
+            self.logger.info(f"Feature selected: {feature_selected}")
+            self.config.continuous_col = feature_selected
+
+
         datamodule = StockDataModule(
             train=train,
             config=self.config,
@@ -106,25 +114,39 @@ class HaimianModel:
 
         # 添加 ModelCheckpoint 回调，保存最优模型
         checkpoint_callback = ModelCheckpoint(
-            monitor="val_loss",  # 监控验证损失
+            monitor=self.config.monitor,  # 监控验证损失
             dirpath=save_dir,        # 稍后在 fit() 中动态设置
-            filename="best_model",
+            filename="best_model_epoch{epoch}",
             save_top_k=1,        # 只保存最好的 1 个模型
-            mode="min",          # 验证损失越小越好
-            save_weights_only=True,  # 只保存权重
+            mode=self.config.mode,          # 验证损失越小越好
+            save_weights_only=True,  #只保存权重
         )
-        # 添加 EarlyStopping 回调，设置早停策略
+        # # 添加 EarlyStopping 回调，设置早停策略
+        # early_stopping_callback = EarlyStopping(
+        #         monitor="val_loss",      # 监控验证损失
+        #         min_delta=0.00,          # 改进的最小阈值
+        #         patience=self.config.patience,              # 在验证损失停止改善后等待的轮数
+        #         verbose=True,            # 是否打印早停信息
+        #         mode="min"               # 验证损失越小越好
+        #     )
+        # 使用profit
         early_stopping_callback = EarlyStopping(
-                monitor="val_loss",      # 监控验证损失
+                monitor=self.config.monitor,      # 监控验证损失
                 min_delta=0.00,          # 改进的最小阈值
                 patience=self.config.patience,              # 在验证损失停止改善后等待的轮数
                 verbose=True,            # 是否打印早停信息
-                mode="min"               # 验证损失越小越好
+                mode=self.config.mode               # 验证损失越小越好
+            )
+        
+        swa_callback = StochasticWeightAveraging(
+                swa_epoch_start=0.8,  # 从 80% 的 epoch 开始平均
+                swa_lrs=0.01,         # SWA 阶段的学习率
+                annealing_epochs=5,   # 退火阶段
             )
 
         return pl.Trainer(
             devices=[0],
-            callbacks=[checkpoint_callback],
+            callbacks=[checkpoint_callback, early_stopping_callback, ],
             default_root_dir=save_dir,
             **trainer_args_config)
     
@@ -154,7 +176,6 @@ class HaimianModel:
         if self.verbose:
             print("Preparing data and training...")
         
-
         # 准备数据
         self.datamodule = self.prepare_datamodule(train)
 
@@ -185,7 +206,6 @@ class HaimianModel:
 
         # 获取最优模型路径, 需要遍历是因为[<TQDMProgressBar>, <ModelCheckpoint>], pytorch lighting 可能会添加一个进度条的回调。
         for callback in self.trainer.callbacks:
-            print(callback)
             if isinstance(callback, ModelCheckpoint):
                 self.best_model_path = callback.best_model_path
                 break
@@ -220,11 +240,13 @@ class HaimianModel:
                 print("Warning: No best model path found, using final trained model.")
 
         if test is not None:
-            test_loader = self.datamodule.prepare_inference_dataloader(test)
+            test_loader, time_index= self.datamodule.prepare_inference_dataloader(test)
         else:
             test_loader = self.datamodule.test_dataloader()
         
-        results = self.trainer.test(self.model, dataloaders=test_loader, verbose=self.verbose)
+        results = self.trainer.test(self.model, dataloaders=test_loader, verbose=False)
+
+        print(results)
         self.logger.log_metrics("eval", results[0])
         return results
 
@@ -405,3 +427,38 @@ class HaimianModel:
         os.rename(log_file, os.path.join(dir, "training.log"))
         if self.verbose:
             print(f"Logger saved to {os.path.join(dir, 'training.log')}")
+
+    def select_factors(self, train: pd.DataFrame, target_col: str) -> List[str]:
+        """因子筛选逻辑，只对连续特征进行筛选。
+
+        参数:
+            train (pd.DataFrame): 训练数据，包含因子和目标变量。
+            target_col (str): 目标变量列名。
+
+        返回:
+            List[str]: 筛选后的因子列名列表。
+        """
+        # 只对 continuous_cols 进行筛选
+        factor_cols = [col for col in self.config.continuous_cols if col in train.columns]
+        corr_threshold_lev1 = self.config.get('corr_threshold_lev1', 0.05)
+        corr_threshold_lev2 = self.config.get('corr_threshold_lev2', 0.0)
+
+        # 一级筛选：基于 rankic
+        corr = train[factor_cols].apply(rankic, y_f=train[target_col])
+        factor_cols_select = corr[corr > corr_threshold_lev1].sort_values(ascending=False).index.tolist()
+
+        # 二级筛选：基于 rankic_v2
+        corr2 = train[factor_cols].apply(rankic_v2, y_f=train[target_col])
+        factor_cols_select2 = corr2[corr2 > corr_threshold_lev2].sort_values(ascending=False).index.tolist()
+
+        # 合并筛选结果
+        factor_cols_select = [col for col in factor_cols_select if col in factor_cols_select2]
+
+        if not factor_cols_select:
+            if self.verbose:
+                print(f"Warning: No factors selected after screening. Check correlation thresholds or data.")
+            return []
+
+        if self.verbose:
+            print(f"Selected factors: {factor_cols_select}")
+        return factor_cols_select

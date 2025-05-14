@@ -72,8 +72,6 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
         else:
             assert custom_loss is not None
             return custom_loss
-        
-
 
     def _init_metrics(self, custom_metrics: Optional[List[Callable]], custom_metrics_prob_inputs: Optional[List[bool]]) -> Dict[str, Callable]:
         """初始化训练和验证的指标。
@@ -160,7 +158,48 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
 
         # 计算指标
         metrics_dict = self._compute_metrics(pred, targets, metrics_targets, stage="val")
+
+    def test_step(self, batch, batch_idx):
+        """测试步骤，计算并记录评估指标"""
+        pred = self(batch)
+        targets = batch["targets"]
+        metrics_targets = batch["metrics_targets"]
+        loss = self._compute_loss(pred, targets)
+        self.log("test_loss", loss, on_epoch=True)
+
+        # 计算指标
+        metrics_dict = self._compute_metrics(pred, targets, metrics_targets, stage="test")
+    
+    def on_test_epoch_end(self):
+        """在训练结束的时候记录测试集指标"""
+        logger = get_logger()
+        metrics_dict = {name: metric.compute().item() for name, metric in self.test_metrics.items()}
+        logger.log_metrics("test", metrics_dict, epoch=self.current_epoch)
+        # 计算val_profit:
+        total_profit = 0
+        for target in self.config.target_cols:
+            if "class" in target:
+                return_mean = metrics_dict.get(f"{target}-return_0_mean", 0.0)
+                return_count = metrics_dict.get(f"{target}-count", 0.0)
+                profit = (return_mean - 0.0014) * return_count
+                total_profit += profit
+        self.log("test_profit", total_profit)
+        logger.log_metrics("test", {"test_profit": total_profit}, epoch=self.current_epoch)
+        for metric in self.test_metrics.values():
+            metric.reset()
         
+    def predict_step(self, batch, batch_idx):
+        """预测步骤，返回字典形式的预测结果"""
+        pred = self(batch)  # {"y60_duo": tensor, "y30_class": tensor}
+        outputs = {}
+        for target_name, pred_tensor in pred.items():
+            if self.task_types[target_name] == "classification":
+                outputs[target_name] = torch.softmax(pred_tensor, dim=-1)  # 转换为概率
+            else:
+                outputs[target_name] = pred_tensor  # 回归任务保持原始值
+        return outputs  # Dict[str, torch.Tensor]
+    
+    
     def on_train_epoch_end(self):
         """在训练epoch结束的时候记录指标"""
         # 使用自定义的指标，实现了compute方法，在最后结束的时候会自动计算
@@ -177,6 +216,16 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
         logger.log_metrics("val", metrics_dict, epoch=self.current_epoch)
         for metric in self.val_metrics.values():
             metric.reset()
+        # 计算val_profit:
+        total_profit = 0
+        for target in self.config.target_cols:
+            if "class" in target:
+                return_mean = metrics_dict.get(f"{target}-return_0_mean", 0.0)
+                return_count = metrics_dict.get(f"{target}-count", 0.0)
+                profit = (return_mean - 0.0014) * return_count
+                total_profit += profit
+        self.log("val_profit", total_profit)
+        logger.log_metrics("val", {"val_profit": total_profit}, epoch=self.current_epoch)
 
     def _compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> torch.Tensor:
         """根据任务类型计算损失。
@@ -188,7 +237,7 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
         返回:
             torch.Tensor: 计算出的损失。
         """
-        # 单任务， 不需要自定义损失函数
+        # 单任务，不需要自定义损失函数
         if len(self.task_types) == 1:
             target_name = list(self.task_types.keys())[0]
             target = targets[target_name]
@@ -228,7 +277,7 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
                 
             else:
                 # 问题：为什么 metric_value 是一个单 batch 的值，但 PL 最终记录的是整个 epoch 的汇总结果？
-                # 答案：
+                # 答案：自定义了缓存区
                 metric_value = metric_fn(task_pred, task_target)
             # # 注意
             # self.log(f"{stage}_{metric_name}", metric_value, on_step=False, on_epoch=True, prog_bar=True)
@@ -252,23 +301,3 @@ class BaseModel(pl.LightningModule, metaclass=ABCMeta):
                     "scheduler": scheduler,
                     "monitor": "val_loss",
                 }}
-
-    def predict_step(self, batch, batch_idx):
-        """预测步骤，返回字典形式的预测结果"""
-        pred = self(batch)  # {"y60_duo": tensor, "y30_class": tensor}
-        
-        outputs = {}
-        for target_name, pred_tensor in pred.items():
-            if self.task_types[target_name] == "classification":
-                outputs[target_name] = torch.softmax(pred_tensor, dim=-1)  # 转换为概率
-            else:
-                outputs[target_name] = pred_tensor  # 回归任务保持原始值
-        return outputs  # Dict[str, torch.Tensor]
-    
-    def test_step(self, batch, batch_idx):
-        """测试步骤，计算并记录评估指标"""
-        pred = self(batch)
-        targets = batch["targets"]
-        loss = self._compute_loss(pred, targets)
-        self.log("test_loss", loss, on_epoch=True)
-        self._compute_metrics(pred, targets, stage="test")

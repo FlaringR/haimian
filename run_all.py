@@ -5,12 +5,16 @@ from config import DataConfig, TrainConfig, ExperimentConfig, ModelConfig
 from typing import List, Any, Dict, Optional
 from models.mlp import MLPModel, MLPConfig
 from models.deepfm import DeepFM, DeepFMConfig
+from models.transformer import TransformerConfig
+from models.dlinear import DLinear, DLinearConfig
 from utils.loss import MultiTaskLoss
 from haimian_model import HaimianModel
 from utils.trainer import get_filelist, set_seed, generate_log_dir
 from utils.logger import HaimianLogger, initialize_logger
+from utils.data_preprocess import preprocess_classification_labels
 import os
 import argparse
+
 
 def train_and_predict_on_file(
     train_file: str,
@@ -41,9 +45,8 @@ def train_and_predict_on_file(
         test = pd.read_feather(test_file)
 
         # 数据预处理
-        train['y'] = train['y60_duo'].apply(lambda x: 1 if x > 0.0020 else 0)
-        test['y'] = test['y60_duo'].apply(lambda x: 1 if x > 0.0020 else 0)
-
+        train = preprocess_classification_labels(train, data_config.threshold_map)
+        test = preprocess_classification_labels(test, data_config.threshold_map)
         # 创建模型
         haimian_model = HaimianModel(
             data_config=data_config,
@@ -54,17 +57,16 @@ def train_and_predict_on_file(
         )
 
         # 自定义损失函数
-        task_weights = {"y": 1.0, "y60_duo": 1.0}
+        task_weights = {"y60_duo_class": 1.0, "y60_duo": 1.0}
         loss_fn = MultiTaskLoss(task_types=data_config.task_types, task_weights=task_weights)
 
         # 训练和预测
         haimian_model.fit(train=train, loss_fn=loss_fn, train_file_name=train_file_name)
-        pred_df = haimian_model.predict(test, train_file_name=train_file_name)
-
-        # # 保存结果
-        # os.makedirs(result_save_dir, exist_ok=True)
-        # result_file = os.path.join(result_save_dir, f"{train_file_name}_pred.csv")
-        # pred_df.to_csv(result_file, index=False)
+        # 评估
+        haimian_model.evaluate(test=test)
+        # 保存
+        haimian_model.predict(test, train_file_name=train_file_name)
+        
     except Exception as e:
         print(e)
 
@@ -155,33 +157,39 @@ def run_training(
 def main():
     """主函数，支持参数遍历"""
     # 定义默认配置
-    exp_config = ExperimentConfig(seed=42)  # 指定种子
+    exp_config = ExperimentConfig(
+        seed=42,
+        gpus=[0,1,2,3],
+        processes_per_gpu=32,
+    )  
+
     data_config = DataConfig(
         categorical_cols=[],
-        continuous_cols=[f"factor_{i}" for i in range(1,11)],
-        target_cols=["y"],
-        task_types={"y": "classification"},
+        continuous_cols=[f"factor_{i}" for i in range(1,57)],
+        # continuous_cols=[f'factor_{i}' for i in range(1, 33)]+[f'factor_{i}' for i in range(41, 57)],
+        target_cols=["y60_duo_class"],
+        task_types={"y60_duo_class": "classification"},
         metrics_target_cols = ["y60_duo", "y120_duo", "y180_duo"],
-        category_col="factor_0",
+        category_col="factor_0", 
+        threshold_map={"y60_duo":0.0016},
         target_category=7,
         window_len=1,
         padding_value=0.0,
-        split_ratio=0.1,
+        split_ratio=0.05,
         split_type="random",
-        split_start=0.9
+        split_start=0.9,
+        select_features= False
     )
-    model_config = DeepFMConfig(
-        layers= "32-32",
+    model_config = TransformerConfig(
     )
 
     trainer_config = TrainConfig(
-    batch_size = 256,
-    max_epochs = 20,
+    batch_size = 512,
+    max_epochs = 30,
+    min_epochs= 15, 
     )
 
     run_training(exp_config, data_config, model_config, trainer_config)
 
-
 if __name__ == "__main__":
     main()
-

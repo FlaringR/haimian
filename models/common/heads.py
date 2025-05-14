@@ -62,12 +62,12 @@ class LinearHead(BaseHead):
         return predictions
 
 class MLPMultiHead(BaseHead):
-    """多层 MLP 头部，为每个任务生成 MLP 输出
+    """多层 MLP 头部，为每个任务生成 MLP 输出，支持 layers='' 退化为单线性层
 
     参数:
         input_dim: 输入维度（主干网络输出维度）
         output_dims: 每个任务的输出维度，例如 {"y60_duo": 1, "y30_class": 3}
-        layers: MLP 层结构，例如 "64-32" 表示两层，分别为 64 和 32 单元
+        layers: MLP 层结构，例如 "64-32" 表示两层，分别为 64 和 32 单元，空字符串表示单线性层
         activation: 激活函数，例如 "ReLU"
         dropout: Dropout 比率
         use_batch_norm: 是否使用 BatchNorm
@@ -80,7 +80,7 @@ class MLPMultiHead(BaseHead):
         layers: str = "64-32",
         activation: str = "ReLU",
         dropout: float = 0.1,
-        use_batch_norm: bool = True,
+        use_batch_norm: bool = False,
         initialization: str = "kaiming"
     ):
         self.layers = layers
@@ -91,27 +91,33 @@ class MLPMultiHead(BaseHead):
         super().__init__(input_dim, output_dims)
 
     def _build_network(self):
-        """构建多任务 MLP 输出层"""
+        """构建多任务 MLP 输出层，支持 layers='' 退化为单线性层"""
         self.output_layers = nn.ModuleDict()
         for task_name, output_dim in self.output_dims.items():
-            # 为每个任务构建独立的 MLP
             layers = []
             curr_units = self.input_dim
-            for units in self.layers.split("-"):
-                layers.extend(
-                    _linear_dropout_bn(
-                        self.activation,
-                        self.initialization,
-                        self.use_batch_norm,
-                        curr_units,
-                        int(units),
-                        self.dropout
+
+            if self.layers:  # 如果 layers 不为空，构建多层 MLP
+                for units in self.layers.split("-"):
+                    layers.extend(
+                        _linear_dropout_bn(
+                            self.activation,
+                            self.initialization,
+                            self.use_batch_norm,
+                            curr_units,
+                            int(units),
+                            self.dropout
+                        )
                     )
-                )
-                curr_units = int(units)
-            # 最后一层：映射到任务输出维度
-            final_layer = nn.Linear(curr_units, output_dim)
+                    curr_units = int(units)
+                # 最后一层：映射到任务输出维度
+                final_layer = nn.Linear(curr_units, output_dim)
+            else:  # layers=''，退化为单线性层
+                final_layer = nn.Linear(curr_units, output_dim)
+
+            # 初始化最后一层
             layers.append(final_layer)
+            nn.init.kaiming_normal_(final_layer.weight, nonlinearity='linear')  # 线性层初始化
             self.output_layers[task_name] = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -128,6 +134,5 @@ class MLPMultiHead(BaseHead):
             pred = layer(x)
             predictions[task_name] = pred.squeeze(-1) if pred.shape[-1] == 1 else pred
         return predictions
-    
 
     

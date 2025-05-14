@@ -212,7 +212,7 @@ class DeepFM(BaseModel):
         # 主干网络
         self._backbone = DeepFMBackbone(self.config)
         # 头部
-        self._head = LinearHead(self._backbone.output_dim, self.config.output_dims)
+        self._head = LinearHead(self._backbone.output_dim, output_dims=self.config.output_dims, )
 
     @property
     def backbone(self):

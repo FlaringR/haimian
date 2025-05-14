@@ -7,18 +7,22 @@ class DataConfig:
     """数据配置类，用于管理 StockDataModule 的参数"""
     continuous_cols: List[str]           # 连续特征列名
     target_cols: List[str]               # 目标列名
-    task_types: Dict[str, str]           # 任务类型字典
+    task_types: Dict[str, str]           # 任务类型字典, 例如{"y180_duo_class": "classification"，"y180_duo": "regression"}
     metrics_target_cols: List[str]       # 评估指标的目标列名
     categorical_cols: Optional[List[str]] = None  # 分类特征列名，可选
     category_col: str = "factor_0"        # 类别列名, 表示股票的分类信息的列，默认为factor_0
     target_category: int = 7              # 目标类别, 默认为第7类
+    threshold_map: dict = field(default_factory=lambda: {"y60_duo": 0.0020})      # 分类阈值
     time_col: str = "index"               # 时间列名, 表示数据中的时间列
     window_len: int = 1                   # 窗口长度
     padding_value: float = 0.0            # 填充值
     split_ratio: float = 0.1              # 训练/验证分割比例（改为 0.2 表示 20% 验证集）
     split_type: str = "time"              # 分割类型："time" , "random", "random_time"
     split_start: float = 0.8              # 时间分割的起始点（当 split_type="time" 时使用）
-
+    select_features: bool = True          # 是否选择特征
+    corr_threshold_lev1: float = 0.05     # 一级相关性阈值
+    corr_threshold_lev2: float = 0.0      # 二级相关性阈值
+    
     @classmethod
     def from_file(cls, file_path: str):
         """从参数文件加载配置并构建 DataConfig"""
@@ -29,11 +33,13 @@ class DataConfig:
 class TrainConfig:
     """训练配置类，用于管理Trainer的参数"""
     max_epochs: int = 20
-    min_epochs: int = 2
+    min_epochs: int = 15
     lr: float = 0.001
     weight_decay: float = 0.0001
-    batch_size: int = 1024
-    patience: int = 3
+    batch_size: int = 256
+    patience: int = 5                 # 早停的忍耐轮数
+    monitor: str = "val_loss"       # 作为早停和保存模型的监控指标， 可选 val_loss , val_profit
+    mode: str = "min"                 # 越大越好还是越小越好, 可选 min , max
 
    
     @classmethod
@@ -51,7 +57,7 @@ class ModelConfig:
     batch_norm_continuous_input: bool = False  # 是否对连续特征输入应用 BatchNorm
     learning_rate: float = 1e-3          # 学习率
     optimizer: str = "Adam"              # 优化器类型，例如 "Adam", "SGD"
-    use_batch_norm: bool = False          # 是否在网络中使用 BatchNorm
+    use_batch_norm: bool = False         # 是否在网络中使用 BatchNorm
     dropout: float = 0.1                 # Dropout 比率
     activation: str = "ReLU"             # 激活函数类型，例如 "ReLU", "LeakyReLU"
     initialization: str = "kaiming"      # 初始化方法，例如 "kaiming", "xavier"
@@ -75,12 +81,12 @@ class InferredConfig:
 @dataclass
 class ExperimentConfig:
     """实验配置类，用于管理实验对象的参数"""
-    train_path: str = "/data/home/lichengzhang/zhoujun/HaimianData/20250325_split/train74_1_300750.SZ"
-    test_path: str = "/data/home/lichengzhang/zhoujun/HaimianData/20250325_split/test74_1_300750.SZ"
-    log_dir: str = "./logs"
+    train_path: str = "/data/home/lichengzhang/zhoujun/HaimianData/20250422_split/train240_5_300750.SZ"
+    test_path: str = "/data/home/lichengzhang/zhoujun/HaimianData/20250422_split/test240_5_300750.SZ"
+    log_dir: str = "/data/home/lichengzhang/zhoujun/Rehaimian/logs"
     start_date: str = "20201230"
     end_date: str = "20230730"
-    gpus: List[int] = field(default_factory=lambda: [0,1,2,3]) # dataclass中不支持可变参数， 用filed每次新开一个， 确保每个实例都有自己独立的列表。
-    processes_per_gpu: int = 36
+    gpus: List[int] = field(default_factory=lambda: [2,3]) # dataclass中不支持可变参数， 用filed每次新开一个， 确保每个实例都有自己独立的列表。
+    processes_per_gpu: int = 64
     seed: int = 42
 

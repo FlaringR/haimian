@@ -9,7 +9,6 @@ from torch import nn
 from pytorch_tabular.models.common.layers.batch_norm import BatchNorm1d
 from pytorch_tabular.utils import _initialize_kaiming
 
-
 # Slight adaptation from https://github.com/jrzaurin/pytorch-widedeep which in turn adapted from AutoGluon
 class SharedEmbeddings(nn.Module):
     """Enables different values in a categorical feature to share some embeddings across."""
@@ -50,7 +49,6 @@ class SharedEmbeddings(nn.Module):
         else:
             w[:, : self.shared_embed.shape[1]] = self.shared_embed
         return w
-
 
 class PreEncoded1dLayer(nn.Module):
     """Takes in pre-encoded categorical variables and just concatenates with continuous variables No learnable
@@ -106,7 +104,6 @@ class PreEncoded1dLayer(nn.Module):
         if self.embd_dropout is not None:
             embed = self.embd_dropout(embed)
         return embed
-
 
 class Embedding1dLayer(nn.Module):
     """Enables different values in a categorical features to have different embeddings."""
@@ -170,7 +167,6 @@ class Embedding1dLayer(nn.Module):
         if self.embd_dropout is not None:
             embed = self.embd_dropout(embed)
         return embed
-
 
 class Embedding2dLayer(nn.Module):
     """Embeds categorical and continuous features into a 2D tensor."""
@@ -311,3 +307,105 @@ class Embedding2dLayer(nn.Module):
         if self.embd_dropout is not None:
             embed = self.embd_dropout(embed)
         return embed
+
+class NumericalCategoricalEmbeddingLayer(nn.Module):
+    def __init__(
+        self,
+        continuous_dim: int,
+        categorical_embedding_dims: Optional[List[Tuple[int, int]]],
+        embedding_dim: int,
+        embedding_dropout: float = 0.0,
+        batch_norm_continuous_input: bool = False
+    ):
+        """数值与离散特征嵌入层，将连续特征和离散特征映射到统一嵌入空间
+
+        参数:
+            continuous_dim: 连续特征维度
+            categorical_embedding_dims: 离散特征嵌入配置，例如 [(5, 8), (10, 8)]
+            embedding_dim: 嵌入维度
+            embedding_dropout: Dropout 比率
+            batch_norm_continuous_input: 是否对连续特征应用 BatchNorm
+        """
+        super().__init__()
+        self.continuous_dim = continuous_dim
+        self.embedding_dim = embedding_dim
+
+        # 离散特征嵌入
+        self.cat_embedding = nn.ModuleList()
+        if categorical_embedding_dims:
+            for n_categories, _ in categorical_embedding_dims:
+                self.cat_embedding.append(nn.Embedding(n_categories, embedding_dim))
+
+        # 连续特征嵌入：每个特征单独嵌入
+        self.num_embedding = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1, embedding_dim),
+                nn.ReLU()
+            ) for _ in range(continuous_dim)
+        ]) if continuous_dim > 0 else None
+
+        # BatchNorm 和 Dropout
+        self.batch_norm = nn.BatchNorm1d(continuous_dim) if batch_norm_continuous_input and continuous_dim > 0 else None
+        self.dropout = nn.Dropout(embedding_dropout) if embedding_dropout > 0 else None
+
+        # 特征数量
+        self.no_cat = len(categorical_embedding_dims) if categorical_embedding_dims else 0
+        self.no_num = continuous_dim if continuous_dim > 0 else 0
+
+        # 初始化权重
+        self._init_weights()
+
+    def _init_weights(self):
+        """初始化嵌入和线性层权重"""
+        for module in self.cat_embedding:
+            nn.init.xavier_uniform_(module.weight)
+        if self.num_embedding:
+            for module in self.num_embedding:
+                for layer in module:
+                    if isinstance(layer, nn.Linear):
+                        nn.init.xavier_uniform_(layer.weight)
+                        if layer.bias is not None:
+                            nn.init.zeros_(layer.bias)
+
+    def forward(self, batch: Dict[str, Any]) -> torch.Tensor:
+        """前向传播，生成连续与离散特征的嵌入
+
+        参数:
+            batch: 包含 'continuous' 和 'categorical' 的字典
+
+        返回:
+            torch.Tensor: 嵌入张量，形状为 [batch_size, no_cat + no_num, embedding_dim]
+        """
+        continuous = batch.get("continuous", torch.tensor([]))
+        categorical = batch.get("categorical", torch.tensor([]))
+        device = continuous.device if continuous.size(-1) > 0 else categorical.device
+        batch_size = continuous.size(0) if continuous.size(-1) > 0 else categorical.size(0)
+
+        # 嵌入列表
+        embeddings = []
+
+        # 离散特征嵌入
+        if categorical.size(-1) > 0 and len(self.cat_embedding) > 0:
+            for i, emb_layer in enumerate(self.cat_embedding):
+                embeddings.append(emb_layer(categorical[:, i].long()))  # [batch_size, embedding_dim]
+
+        # 连续特征嵌入：逐特征处理
+        if continuous.size(-1) > 0 and self.num_embedding:
+            cont = continuous
+            if self.batch_norm:
+                cont = self.batch_norm(cont)
+            for i, emb_layer in enumerate(self.num_embedding):
+                embeddings.append(emb_layer(cont[:, i].unsqueeze(1)))  # [batch_size, embedding_dim]
+
+        # 处理空特征情况
+        if not embeddings:
+            return torch.zeros(batch_size, 0, self.embedding_dim, device=device)
+
+        # 拼接嵌入
+        output = torch.stack(embeddings, dim=1)  # [batch_size, no_cat + no_num, embedding_dim]
+
+        # Dropout
+        if self.dropout:
+            output = self.dropout(output)
+
+        return output
